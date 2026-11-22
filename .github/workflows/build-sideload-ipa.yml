@@ -73,6 +73,7 @@ jobs:
 
           unzip -Z1 "$ipa_path" > "$RUNNER_TEMP/input-ipa-files.txt"
           app_info=$(awk '/^Payload\/[^/]+\.app\/Info\.plist$/ { print; exit }' "$RUNNER_TEMP/input-ipa-files.txt")
+          app_info=$(grep -E -m 1 '^Payload/[^/]+[.]app/Info[.]plist$' "$RUNNER_TEMP/input-ipa-files.txt" || true)
           [[ -n "$app_info" ]] || { echo "::error::The download is not an app IPA with Payload/*.app/Info.plist."; exit 1; }
           bundle_id=$(unzip -p "$ipa_path" "$app_info" | plutil -extract CFBundleIdentifier raw -)
           case "$bundle_id" in
