@@ -1,0 +1,115 @@
+name: Build DYKiller sideload IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: HTTPS direct-download URL for a decrypted Douyin IPA
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      THEOS_LOGOS_REV: a62370066a97e36d59b200a9fa10c5091f5e8972
+
+    steps:
+      - name: Require a private builder repository
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [[ "$REPOSITORY_PRIVATE" != "true" ]]; then
+            echo "::error::Use a private builder repository. Do not publish a patched app IPA as a public Actions artifact."
+            exit 1
+          fi
+
+      - name: Check out DYKiller source
+        uses: actions/checkout@v4
+        with:
+          repository: HierarchThurs/DYKiller
+          ref: main
+          path: DYKiller
+          persist-credentials: false
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.1.1'
+
+      - name: Set up Theos
+        working-directory: DYKiller
+        run: bash .github/scripts/setup-theos.sh
+
+      - name: Install IPA injection tool
+        run: |
+          python3 -m pip install --upgrade --break-system-packages \
+            git+https://github.com/asdfzxcvbn/pyzule-rw.git
+          cyan --help >/dev/null
+
+      - name: Build DYKiller dylib
+        id: build
+        working-directory: DYKiller
+        run: |
+          set -euo pipefail
+          version=$(awk -F': *' '$1 == "Version" { print $2; exit }' control)
+          [[ -n "$version" ]] || { echo "Missing package version in control" >&2; exit 1; }
+          make package-rootful FINALPACKAGE=1
+          [[ -s packages/DYKiller.dylib ]] || { echo "DYKiller.dylib was not produced" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download, validate, and inject IPA
+        env:
+          IPA_URL: ${{ inputs.ipa_url }}
+          DYKILLER_VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          printf '::add-mask::%s\n' "$IPA_URL"
+          case "$IPA_URL" in
+            https://*) ;;
+            *) echo "::error::ipa_url must be an HTTPS direct-download URL."; exit 1 ;;
+          esac
+
+          ipa_path="$RUNNER_TEMP/douyin-input.ipa"
+          curl --fail --location --retry 2 --retry-all-errors \
+            --connect-timeout 30 --max-time 900 --silent --show-error \
+            "$IPA_URL" --output "$ipa_path"
+          unzip -tq "$ipa_path" >/dev/null
+
+          unzip -Z1 "$ipa_path" > "$RUNNER_TEMP/input-ipa-files.txt"
+          app_info=$(awk '/^Payload\/[^/]+\.app\/Info\.plist$/ { print; exit }' "$RUNNER_TEMP/input-ipa-files.txt")
+          [[ -n "$app_info" ]] || { echo "::error::The download is not an app IPA with Payload/*.app/Info.plist."; exit 1; }
+          bundle_id=$(unzip -p "$ipa_path" "$app_info" | plutil -extract CFBundleIdentifier raw -)
+          case "$bundle_id" in
+            com.ss.iphone.ugc.Aweme|com.ss.iphone.ugc.aweme.lite) ;;
+            *) echo "::error::Unsupported app bundle id: $bundle_id"; exit 1 ;;
+          esac
+
+          output_ipa="$RUNNER_TEMP/DYKiller-${DYKILLER_VERSION}-sideload.ipa"
+          cyan -i "$ipa_path" -o "$output_ipa" \
+            -f "$GITHUB_WORKSPACE/DYKiller/packages/DYKiller.dylib" -c 9
+          unzip -Z1 "$output_ipa" > "$RUNNER_TEMP/patched-ipa-files.txt"
+          grep -F 'DYKiller.dylib' "$RUNNER_TEMP/patched-ipa-files.txt" >/dev/null || {
+            echo "::error::DYKiller.dylib is missing from the patched IPA."
+            exit 1
+          }
+
+          echo "DYKILLER_IPA=$output_ipa" >> "$GITHUB_ENV"
+          {
+            echo "### IPA built"
+            echo "- DYKiller: ${DYKILLER_VERSION}"
+            echo "- Target bundle: ${bundle_id}"
+            echo "- Sign and install the downloaded IPA with a sideloading tool."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload patched IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DYKiller-${{ steps.build.outputs.version }}-sideload-IPA
+          path: ${{ env.DYKILLER_IPA }}
+          if-no-files-found: error
+          retention-days: 7
