@@ -19,15 +19,6 @@ jobs:
       THEOS_LOGOS_REV: a62370066a97e36d59b200a9fa10c5091f5e8972
 
     steps:
-      - name: Require a private builder repository
-        env:
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
-        run: |
-          if [[ "$REPOSITORY_PRIVATE" != "true" ]]; then
-            echo "::error::Use a private builder repository. Do not publish a patched app IPA as a public Actions artifact."
-            exit 1
-          fi
-
       - name: Check out DYKiller source
         uses: actions/checkout@v4
         with:
